@@ -1,165 +1,162 @@
 import streamlit as st
+from supabase import create_client, Client
 import pandas as pd
+import time
 
-# 页面基本配置
-st.set_page_config(page_title="🀄 打牌计分神器", page_icon="🃏", layout="centered")
+# --- 页面配置 ---
+st.set_page_config(page_title="🀄 全局同步计分系统 (Supabase版)", layout="centered")
 
-st.title("🃏 打牌/麻将计分神器")
+# --- 1. 初始化 Supabase 连接 ---
+@st.cache_resource
+def init_connection() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
-# 初始化 Session State 以保存状态
-if "setup_done" not in st.session_state:
-    st.session_state.setup_done = False
-    st.session_state.players = []
-    st.session_state.scores = {}
-    st.session_state.tea_pool = 0.0
-    st.session_state.history = []
-    st.session_state.tea_mode = "无"
-    st.session_state.tea_rate = 0.0
+supabase = init_connection()
 
-# ================= 1. 游戏设置阶段 =================
-if not st.session_state.setup_done:
-    st.header("⚙️ 游戏初始化设置")
+st.title("🀄 棋牌实时同步计分系统")
+
+# --- 2. 房间登录系统 ---
+if "room_id" not in st.session_state:
+    st.subheader("🔑 进入房间")
+    room_input = st.text_input("请输入房间号 (如：8888)", placeholder="相同房间号数据互通")
+    user_name = st.text_input("你的名字", placeholder="例如：张三")
     
-    # 玩家人数和名字
-    num_players = st.slider("请选择玩家人数", min_value=3, max_value=6, value=4)
-    players = []
-    
-    cols = st.columns(2)
-    for i in range(num_players):
-        with cols[i % 2]:
-            name = st.text_input(f"玩家 {i+1} 昵称", value=f"玩家{i+1}", key=f"name_{i}")
-            players.append(name)
-
-    st.divider()
-    
-    # 茶水费设置
-    st.subheader("☕ 茶水/饭钱设置")
-    tea_mode = st.radio(
-        "请选择茶水费收取模式：", 
-        ["不设置茶水费", "赢家按比例抽水", "独立茶水池(自愿打款)"]
-    )
-    
-    tea_rate = 0.0
-    if tea_mode == "赢家按比例抽水":
-        tea_rate = st.number_input("请输入抽水比例 (%)", min_value=0.0, max_value=100.0, value=5.0, step=1.0) / 100.0
-        st.info(f"提示：每局赢家的利润中将有 {tea_rate*100}% 自动流入茶水池。")
-    elif tea_mode == "独立茶水池(自愿打款)":
-        st.info("提示：游戏开始后，玩家可以随时手动将自己的余额转入公共茶水池。")
-
-    # 开始游戏按钮
-    if st.button("🚀 开始游戏", use_container_width=True):
-        if len(set(players)) != len(players):
-            st.error("玩家名字不能重复，请修改！")
+    if st.button("进入房间", type="primary"):
+        if room_input and user_name:
+            st.session_state.room_id = room_input
+            st.session_state.my_name = user_name
+            st.rerun()
         else:
-            st.session_state.players = players
-            st.session_state.scores = {p: 0.0 for p in players}
-            st.session_state.tea_mode = tea_mode
-            st.session_state.tea_rate = tea_rate
-            st.session_state.setup_done = True
+            st.error("请填入房间号和名字")
+    st.stop()
+
+# --- 3. 获取云端数据 ---
+room_id = st.session_state.room_id
+
+def get_room_data():
+    # 从 Supabase 获取当前房间的所有对局数据，按局数升序排列
+    response = supabase.table("game_rounds").select("*").eq("room_id", room_id).order("round_number").execute()
+    return response.data
+
+raw_data = get_room_data()
+
+st.sidebar.info(f"🏠 当前房间：**{room_id}**\n\n👤 你的身份：**{st.session_state.my_name}**")
+if st.sidebar.button("🔄 手动刷新比分"):
+    st.rerun()
+
+# --- 4. 数据解析与处理 ---
+# 如果房间为空（没有任何数据）
+if not raw_data:
+    st.warning("本房间暂无玩家数据，请初始化房间。")
+    st.subheader("⚙️ 初始化新房间")
+    names_str = st.text_area("请输入所有玩家名字（用逗号或空格分隔）", placeholder="张三, 李四, 王五, 赵六")
+    
+    if st.button("创建房间记录"):
+        # 处理玩家名字
+        names = [n.strip() for n in names_str.replace("，", ",").replace(" ", ",").split(",") if n.strip()]
+        if len(names) >= 3:
+            # 构造第 0 局（初始状态）
+            init_details = {name: 0.0 for name in names}
+            init_details["茶水费"] = 0.0
+            init_details["操作人"] = "系统初始化"
+            
+            # 写入 Supabase
+            supabase.table("game_rounds").insert({
+                "room_id": room_id,
+                "round_number": 0,
+                "details": init_details
+            }).execute()
+            
+            st.success("房间创建成功！")
+            time.sleep(1)
+            st.rerun()
+        else:
+            st.error("至少需要 3 名玩家才能开始。")
+    st.stop()
+
+# 解析 JSONB 数据为 DataFrame 方便计算和展示
+history_list = []
+players_set = set()
+
+for row in raw_data:
+    detail = row["details"]
+    record = {"局数": row["round_number"]}
+    for k, v in detail.items():
+        record[k] = v
+        if k not in ["茶水费", "操作人"]:
+            players_set.add(k)
+    history_list.append(record)
+
+df_history = pd.DataFrame(history_list)
+players = list(players_set)
+current_round_num = max([row["round_number"] for row in raw_data])
+
+# --- 5. 实时战况看板 ---
+st.header("📊 实时战况")
+
+# 计算当前得分（将所有局数的分数加起来）
+current_scores = {p: df_history[p].sum() if p in df_history.columns else 0.0 for p in players}
+tea_pool = df_history["茶水费"].sum() if "茶水费" in df_history.columns else 0.0
+
+# 动态列展示
+cols = st.columns(len(players) + 1)
+for i, p in enumerate(players):
+    cols[i].metric(p, round(current_scores[p], 2))
+cols[-1].metric("☕ 茶水池", round(tea_pool, 2))
+
+st.divider()
+
+# --- 6. 记账表单 ---
+st.header("📝 提交分数")
+with st.form("add_round"):
+    st.write(f"正在录入第 **{current_round_num + 1}** 局")
+    round_input = {}
+    input_cols = st.columns(3)
+    
+    for i, p in enumerate(players):
+        with input_cols[i % 3]:
+            # step=10.0 方便快速增减
+            round_input[p] = st.number_input(f"{p} 得分", value=0.0, step=10.0, format="%.1f")
+            
+    tea_fee_input = st.number_input("本局扣除茶水费 (可选)", value=0.0, step=5.0, min_value=0.0)
+    
+    submitted = st.form_submit_button("✅ 提交并同步到云端", use_container_width=True)
+    
+    if submitted:
+        # 校验零和：玩家分数总和 + 茶水费 应该等于 0 (或者单纯校验玩家总分)
+        # 这里采用：玩家输入的得分总计必须为 0。茶水费是从某人赢的钱里单独拿出来的。
+        if round(sum(round_input.values()), 2) != 0:
+            st.error(f"⚠️ 分数总和必须为 0！当前总和：{sum(round_input.values())}")
+        else:
+            # 构造要存入 JSONB 的数据
+            details_to_save = {p: score for p, score in round_input.items()}
+            details_to_save["茶水费"] = tea_fee_input
+            details_to_save["操作人"] = st.session_state.my_name
+            
+            # 写入 Supabase
+            supabase.table("game_rounds").insert({
+                "room_id": room_id,
+                "round_number": current_round_num + 1,
+                "details": details_to_save
+            }).execute()
+            
+            st.success("同步成功！")
+            time.sleep(1)
             st.rerun()
 
-# ================= 2. 游戏进行阶段 =================
-if st.session_state.setup_done:
-    # --- A. 顶部比分板 ---
-    st.header("📊 当前战况")
-    
-    # 动态生成列（玩家人数 + 1个茶水池）
-    score_cols = st.columns(len(st.session_state.players) + 1)
-    for i, p in enumerate(st.session_state.players):
-        score_cols[i].metric(label=p, value=round(st.session_state.scores[p], 2))
-    
-    # 突出显示茶水池
-    score_cols[-1].metric(label="☕ 茶水池", value=round(st.session_state.tea_pool, 2))
-    
-    st.divider()
+st.divider()
 
-    # --- B. 每局记账表单 ---
-    st.header("📝 记录新一局")
-    with st.form("round_form"):
-        st.write(f"**第 {len(st.session_state.history) + 1} 局**")
-        round_scores = {}
-        input_cols = st.columns(3)
-        
-        for i, p in enumerate(st.session_state.players):
-            with input_cols[i % 3]:
-                # 默认步长为 1，可以输入负数
-                round_scores[p] = st.number_input(f"{p} 得分", value=0.0, step=10.0, format="%.1f")
+# --- 7. 历史流水明细 ---
+st.header("📜 历史流水 (全员同步)")
+# 整理一下列的顺序，让显示更美观
+cols_order = ["局数"] + players + ["茶水费", "操作人"]
+# 过滤掉第 0 局（初始化局）
+display_df = df_history[df_history["局数"] > 0]
 
-        submitted = st.form_submit_button("✅ 提交本局", use_container_width=True)
-        
-        if submitted:
-            # 校验总分是否为 0 (零和博弈)
-            if round(sum(round_scores.values()), 2) != 0:
-                st.error(f"⚠️ 账目不对！所有人得分总和必须为 0。当前总和为: {sum(round_scores.values())}")
-            else:
-                round_record = {"局数": len(st.session_state.history) + 1}
-                round_tea = 0.0
-
-                # 结算逻辑
-                for p, score in round_scores.items():
-                    actual_score = score
-                    # 如果是赢家并且开启了按比例抽水
-                    if score > 0 and st.session_state.tea_mode == "赢家按比例抽水":
-                        water = score * st.session_state.tea_rate
-                        actual_score = score - water
-                        round_tea += water
-                    
-                    st.session_state.scores[p] += actual_score
-                    round_record[p] = actual_score
-                
-                # 更新茶水池
-                st.session_state.tea_pool += round_tea
-                round_record["茶水费"] = round_tea
-
-                # 记录历史
-                st.session_state.history.append(round_record)
-                st.success("✅ 记账成功！")
-                st.rerun()
-
-    # --- C. 独立茶水池打款功能 ---
-    if st.session_state.tea_mode == "独立茶水池(自愿打款)":
-        st.divider()
-        st.subheader("💰 向茶水池打钱")
-        with st.form("tea_fund_form"):
-            t_cols = st.columns(2)
-            contributor = t_cols[0].selectbox("打款人", st.session_state.players)
-            amount = t_cols[1].number_input("金额", min_value=0.0, step=10.0)
-            
-            fund_submitted = st.form_submit_button("确认打入公共池")
-            if fund_submitted and amount > 0:
-                # 打款人分数减少，茶水池增加
-                st.session_state.scores[contributor] -= amount
-                st.session_state.tea_pool += amount
-                
-                # 记录这笔特殊账目
-                st.session_state.history.append({
-                    "局数": "茶水打赏",
-                    contributor: -amount,
-                    "茶水费": amount
-                })
-                st.rerun()
-
-    st.divider()
-
-    # --- D. 历史记录 ---
-    st.header("📜 历史流水")
-    if st.session_state.history:
-        # 将历史记录转为 DataFrame 方便展示
-        df = pd.DataFrame(st.session_state.history)
-        
-        # 确保列的顺序：局数、玩家名字、茶水费
-        cols_order = ["局数"] + st.session_state.players + ["茶水费"]
-        # 补全可能缺失的列（比如打赏记录里没出现的玩家设为0）
-        for col in cols_order:
-            if col not in df.columns:
-                df[col] = 0.0
-        df = df[cols_order].fillna(0)
-        
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # --- E. 危险区 ---
-    st.divider()
-    if st.button("🔄 结束游戏并清空数据", type="primary"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+if not display_df.empty:
+    display_df = display_df[cols_order].fillna(0)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+else:
+    st.info("暂无打牌记录")
