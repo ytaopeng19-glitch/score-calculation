@@ -4,7 +4,7 @@ import pandas as pd
 import time
 
 # --- 页面配置 ---
-st.set_page_config(page_title="🀄 棋牌同步计分系统", layout="wide") # 改为宽屏模式方便查看长表格
+st.set_page_config(page_title="🀄 棋牌实时同步计分", layout="wide")
 
 # --- 1. 初始化 Supabase 连接 ---
 @st.cache_resource
@@ -46,15 +46,14 @@ def get_room_data():
 raw_data = get_room_data()
 
 st.sidebar.info(f"🏠 房间：**{room_id}** \n👤 身份：**{st.session_state.my_name}**")
-if st.sidebar.button("🔄 刷新全员比分"):
+if st.sidebar.button("🔄 刷新全员数据"):
     st.rerun()
 
-# --- 4. 数据解析与累计分数计算 ---
+# --- 4. 数据解析与处理 ---
 if not raw_data:
     st.warning("本房间暂无数据。")
     st.subheader("⚙️ 初始化新房间")
     names_str = st.text_area("输入玩家名字（用逗号或空格隔开）", placeholder="张三, 李四, 王五")
-    
     if st.button("创建房间"):
         names = [n.strip() for n in names_str.replace("，", ",").replace(" ", ",").split(",") if n.strip()]
         if len(names) >= 2:
@@ -62,7 +61,7 @@ if not raw_data:
             init_details["茶水费"] = 0.0
             init_details["操作人"] = "系统初始化"
             supabase.table("game_rounds").insert({"room_id": room_id, "round_number": 0, "details": init_details}).execute()
-            st.success("创建成功！")
+            st.success("房间创建成功！")
             time.sleep(1)
             st.rerun()
         else:
@@ -84,59 +83,68 @@ df_history = pd.DataFrame(history_list)
 players = sorted(list(players_set))
 current_round_num = max([row["round_number"] for row in raw_data])
 
-# --- 核心修改：计算累计分数 ---
-# 对每一位玩家计算从第一局到当前的累加和
+# 计算累计分数
 for p in players:
     df_history[f"{p}(累计)"] = df_history[p].cumsum()
 
-# --- 5. 实时战况看板 ---
-st.header("📊 实时战况")
+# --- 5. 【新增：显眼的累计走势板块】 ---
+st.header("📈 战况总览与走势")
+
+# 顶部大数字卡片
 current_scores = {p: df_history[p].sum() for p in players}
 tea_pool = df_history["茶水费"].sum() if "茶水费" in df_history.columns else 0.0
 
-cols = st.columns(len(players) + 1)
+m_cols = st.columns(len(players) + 1)
 for i, p in enumerate(players):
-    cols[i].metric(p, round(current_scores[p], 2))
-cols[-1].metric("☕ 茶水池合计", round(tea_pool, 2))
+    m_cols[i].metric(p, round(current_scores[p], 2))
+m_cols[-1].metric("☕ 茶水池", round(tea_pool, 2))
+
+# 走势图表
+st.subheader("📊 积分走势曲线")
+# 准备绘图数据
+chart_data = df_history.set_index("局数")[[f"{p}(累计)" for p in players]]
+# 重命名列名以便图表显示更干净
+chart_data.columns = players
+st.line_chart(chart_data)
 
 st.divider()
 
 # --- 6. 记账区域 ---
 st.header("📝 提交分数")
-score_options = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, -5, -10, -15, -20, -25, -30, -40, -50, -60, -80, -100]
+score_options = [0, 5, 10, 15, 20, 30, 40, 50, 60, 80, 100, -5, -10, -15, -20, -30, -40, -50, -60, -80, -100]
 score_options = sorted(list(set(score_options)), reverse=True)
 
-current_round_input = {}
-cols_input = st.columns(len(players)) 
-for i, p in enumerate(players):
-    with cols_input[i]:
-        current_round_input[p] = st.selectbox(f"**{p}**", score_options, index=score_options.index(0), key=f"sb_{p}")
+with st.container(border=True):
+    cols_input = st.columns(len(players)) 
+    current_round_input = {}
+    for i, p in enumerate(players):
+        with cols_input[i]:
+            current_round_input[p] = st.selectbox(f"**{p}**", score_options, index=score_options.index(0), key=f"sb_{p}")
 
-tea_val = st.number_input("本局扣除茶水费 (如有)", value=0.0, step=5.0)
+    tea_val = st.number_input("本局茶水费", value=0.0, step=5.0)
 
-if st.button("✅ 确认提交本局", type="primary", use_container_width=True):
-    total = sum(current_round_input.values())
-    if round(total, 2) != 0:
-        st.error(f"⚠️ 分数不平！当前所有人合计：{total} (必须为0)")
-    else:
-        details = {p: s for p, s in current_round_input.items()}
-        details["茶水费"] = tea_val
-        details["操作人"] = st.session_state.my_name
-        supabase.table("game_rounds").insert({"room_id": room_id, "round_number": current_round_num + 1, "details": details}).execute()
-        st.success("记账成功！")
-        time.sleep(0.5)
-        st.rerun()
+    if st.button("✅ 确认提交本局", type="primary", use_container_width=True):
+        total = sum(current_round_input.values())
+        if round(total, 2) != 0:
+            st.error(f"⚠️ 分数不平！合计：{total}")
+        else:
+            details = {p: s for p, s in current_round_input.items()}
+            details["茶水费"] = tea_val
+            details["操作人"] = st.session_state.my_name
+            supabase.table("game_rounds").insert({"room_id": room_id, "round_number": current_round_num + 1, "details": details}).execute()
+            st.success("同步成功！")
+            time.sleep(0.5)
+            st.rerun()
 
 st.divider()
 
-# --- 7. 历史流水与管理 (包含累计分数) ---
-st.header("📜 历史流水 (含每局累计)")
+# --- 7. 历史流水与管理 ---
+st.header("📜 历史流水明细")
 
-# 过滤掉初始化的第 0 局
-display_df = df_history[df_history["局_num" if "局_num" in df_history.columns else "局数"] > 0].copy()
+display_df = df_history[df_history["局数"] > 0].copy()
 
 if not display_df.empty:
-    # 构造显示的列顺序：局数 -> [玩家A, 玩家A累计, 玩家B, 玩家B累计...] -> 茶水费 -> 操作人
+    # 构造显示的列顺序
     dynamic_cols = []
     for p in players:
         dynamic_cols.append(p)
@@ -144,26 +152,24 @@ if not display_df.empty:
     
     final_cols = ["局数"] + dynamic_cols + ["茶水费", "操作人"]
     
-    # 倒序排列，让最新的在最上面
+    # 倒序排列
     reversed_df = display_df.iloc[::-1]
     
-    # 使用 st.dataframe 展示，并对累计分数进行高亮或样式处理
     st.dataframe(
-        reversed_df[final_cols].style.format(precision=1),
+        reversed_df[final_cols].style.background_gradient(subset=[f"{p}(累计)" for p in players], cmap="RdYlGn"),
         use_container_width=True, 
         hide_index=True
     )
 
     # --- 删除功能区 ---
     st.subheader("⚠️ 数据修正")
-    with st.expander("点击展开管理选项（删除错误记录）"):
+    with st.expander("点击展开：删除错误记录"):
         target_round = st.selectbox("选择要删除的局数", options=display_df["局数"].tolist())
         target_id = display_df[display_df["局数"] == target_round]["id"].values[0]
-        
-        if st.button(f"🔥 确认永久删除第 {target_round} 局", type="secondary", use_container_width=True):
+        if st.button(f"🔥 确认删除第 {target_round} 局", type="secondary", use_container_width=True):
             supabase.table("game_rounds").delete().eq("id", int(target_id)).execute()
-            st.warning(f"第 {target_round} 局已从数据库删除！")
+            st.warning("已删除！")
             time.sleep(1)
             st.rerun()
 else:
-    st.info("暂无打牌记录")
+    st.info("暂无记录")
