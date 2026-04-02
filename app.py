@@ -4,12 +4,11 @@ import pandas as pd
 import time
 
 # --- 页面配置 ---
-st.set_page_config(page_title="🀄 棋牌实时同步计分系统", layout="centered")
+st.set_page_config(page_title="🀄 棋牌同步计分系统", layout="centered")
 
 # --- 1. 初始化 Supabase 连接 ---
 @st.cache_resource
 def init_connection() -> Client:
-    # 确保你已经在 Streamlit Cloud 的 Secrets 中配置了这两个 Key
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
@@ -97,56 +96,58 @@ cols[-1].metric("☕ 茶水池", round(tea_pool, 2))
 
 st.divider()
 
-# --- 6. 快捷记账区域 ---
+# --- 6. 下拉记账区域 ---
 st.header("📝 提交分数")
-
-# 初始化临时分数缓存
-if "temp_scores" not in st.session_state:
-    st.session_state.temp_scores = {p: 0.0 for p in players}
-
-def add_score(player, amount):
-    st.session_state.temp_scores[player] += amount
-
 st.write(f"正在录入第 **{current_round_num + 1}** 局")
 
-for p in players:
-    with st.container():
-        c1, c2 = st.columns([1, 2])
-        c1.write(f"**{p}**")
-        # 绑定到 session_state
-        st.session_state.temp_scores[p] = c2.number_input(
-            f"分值_{p}", value=st.session_state.temp_scores[p], step=1.0, key=f"in_{p}", label_visibility="collapsed"
-        )
-        
-        # 四个快捷按钮
-        b1, b2, b3, b4 = st.columns(4)
-        if b1.button("-10", key=f"m10_{p}"): add_score(p, -10); st.rerun()
-        if b2.button("-5", key=f"m5_{p}"): add_score(p, -5); st.rerun()
-        if b3.button("+5", key=f"p5_{p}"): add_score(p, 5); st.rerun()
-        if b4.button("+10", key=f"p10_{p}"): add_score(p, 10); st.rerun()
-    st.write("")
+# 定义分数选项
+score_options = [0, 5, 10, 15, 20, 30, 40, 50, 100, -5, -10, -15, -20, -30, -40, -50, -100]
+score_options.sort(reverse=True) # 从大到小排列
 
-# 茶水费和提交
+# 为每个玩家创建下拉框
+current_round_input = {}
+for p in players:
+    # 每一个玩家对应一个独立的 selectbox
+    current_round_input[p] = st.selectbox(
+        f"玩家 **{p}** 的本局得分",
+        options=score_options,
+        index=score_options.index(0), # 默认为 0
+        key=f"sb_{p}"
+    )
+
+st.write("")
 t_col, s_col = st.columns([1, 1])
 tea_val = t_col.number_input("本局抽水 (茶水费)", value=0.0, step=5.0)
 
-if s_col.button("✅ 提交并同步全员", type="primary", use_container_width=True):
-    total = sum(st.session_state.temp_scores.values())
+# 提交按钮逻辑
+if s_col.button("✅ 确认提交", type="primary", use_container_width=True):
+    total = sum(current_round_input.values())
+    
+    # 校验：所有玩家得分相加必须为 0
     if round(total, 2) != 0:
-        st.error(f"分数不平！当前总和：{total}")
+        st.error(f"⚠️ 分数不平！当前所有人合计：{total}。请调整后再提交。")
     else:
-        details = {p: s for p, s in st.session_state.temp_scores.items()}
+        # 准备存入数据库的数据
+        details = {p: s for p, s in current_round_input.items()}
         details["茶水费"] = tea_val
         details["操作人"] = st.session_state.my_name
-        supabase.table("game_rounds").insert({"room_id": room_id, "round_number": current_round_num + 1, "details": details}).execute()
-        # 重置并刷新
-        for p in players: st.session_state.temp_scores[p] = 0.0
-        st.success("同步成功！")
+        
+        with st.spinner("正在同步数据..."):
+            supabase.table("game_rounds").insert({
+                "room_id": room_id, 
+                "round_number": current_round_num + 1, 
+                "details": details
+            }).execute()
+        
+        st.success("记账成功！")
         time.sleep(0.5)
         st.rerun()
 
-if st.button("🧹 重置本局输入", use_container_width=True):
-    for p in players: st.session_state.temp_scores[p] = 0.0
+# 重置按钮（通过清除 session_state 中的 key）
+if st.button("🧹 清空当前选择", use_container_width=True):
+    for p in players:
+        if f"sb_{p}" in st.session_state:
+            del st.session_state[f"sb_{p}"]
     st.rerun()
 
 st.divider()
