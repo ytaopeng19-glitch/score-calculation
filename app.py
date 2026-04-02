@@ -20,7 +20,7 @@ st.title("🀄 棋牌实时同步计分系统")
 # --- 2. 房间登录系统 ---
 if "room_id" not in st.session_state:
     st.subheader("🔑 进入房间")
-    room_input = st.text_input("请输入房间号 (如：8888)", placeholder="相同房间号数据互通")
+    room_input = st.text_input("请输入房间号", placeholder="如：8888")
     user_name = st.text_input("你的名字", placeholder="例如：张三")
     
     if st.button("进入房间", type="primary"):
@@ -37,6 +37,7 @@ room_id = st.session_state.room_id
 
 def get_room_data():
     try:
+        # 加上 count 参数方便获取总数
         response = supabase.table("game_rounds").select("*").eq("room_id", room_id).order("round_number").execute()
         return response.data
     except Exception as e:
@@ -46,18 +47,17 @@ def get_room_data():
 raw_data = get_room_data()
 
 st.sidebar.info(f"🏠 房间：**{room_id}** \n👤 身份：**{st.session_state.my_name}**")
-if st.sidebar.button("🔄 刷新全员比分"):
+if st.sidebar.button("🔄 刷新数据"):
     st.rerun()
 
 # --- 4. 数据解析 ---
 if not raw_data:
     st.warning("本房间暂无数据。")
     st.subheader("⚙️ 初始化新房间")
-    names_str = st.text_area("输入所有玩家名字（用逗号或空格隔开）", placeholder="张三, 李四, 王五, 赵六")
-    
+    names_str = st.text_area("输入玩家名字（逗号隔开）", placeholder="张三, 李四, 王五")
     if st.button("创建房间"):
         names = [n.strip() for n in names_str.replace("，", ",").replace(" ", ",").split(",") if n.strip()]
-        if len(names) >= 3:
+        if len(names) >= 2:
             init_details = {name: 0.0 for name in names}
             init_details["茶水费"] = 0.0
             init_details["操作人"] = "系统初始化"
@@ -66,7 +66,7 @@ if not raw_data:
             time.sleep(1)
             st.rerun()
         else:
-            st.error("至少需要 3 名玩家")
+            st.error("至少需要 2 名玩家")
     st.stop()
 
 # 解析历史数据
@@ -74,7 +74,7 @@ history_list = []
 players_set = set()
 for row in raw_data:
     detail = row["details"]
-    record = {"局数": row["round_number"]}
+    record = {"id": row["id"], "局数": row["round_number"]} # 记录数据库 ID 方便删除
     for k, v in detail.items():
         record[k] = v
         if k not in ["茶水费", "操作人"]: players_set.add(k)
@@ -96,65 +96,62 @@ cols[-1].metric("☕ 茶水池", round(tea_pool, 2))
 
 st.divider()
 
-# --- 6. 下拉记账区域 ---
+# --- 6. 记账区域 ---
 st.header("📝 提交分数")
-st.write(f"正在录入第 **{current_round_num + 1}** 局")
+score_options = [0, 5, 10, 15, 20, 30, 40, 50, 60, 80, 100, -5, -10, -15, -20, -30, -40, -50, -60, -80, -100]
+score_options = sorted(list(set(score_options)), reverse=True)
 
-# 定义分数选项
-score_options = [0, 5, 10, 15, 20, 30, 40, 50, 100, -5, -10, -15, -20, -30, -40, -50, -100]
-score_options.sort(reverse=True) # 从大到小排列
-
-# 为每个玩家创建下拉框
 current_round_input = {}
-for p in players:
-    # 每一个玩家对应一个独立的 selectbox
-    current_round_input[p] = st.selectbox(
-        f"玩家 **{p}** 的本局得分",
-        options=score_options,
-        index=score_options.index(0), # 默认为 0
-        key=f"sb_{p}"
-    )
+cols_input = st.columns(2) # 两列排列更省空间
+for i, p in enumerate(players):
+    with cols_input[i % 2]:
+        current_round_input[p] = st.selectbox(f"**{p}**", score_options, index=score_options.index(0), key=f"sb_{p}")
 
-st.write("")
-t_col, s_col = st.columns([1, 1])
-tea_val = t_col.number_input("本局抽水 (茶水费)", value=0.0, step=5.0)
+tea_val = st.number_input("本局茶水费", value=0.0, step=5.0)
 
-# 提交按钮逻辑
-if s_col.button("✅ 确认提交", type="primary", use_container_width=True):
+if st.button("✅ 确认提交", type="primary", use_container_width=True):
     total = sum(current_round_input.values())
-    
-    # 校验：所有玩家得分相加必须为 0
     if round(total, 2) != 0:
-        st.error(f"⚠️ 分数不平！当前所有人合计：{total}。请调整后再提交。")
+        st.error(f"⚠️ 分数不平！合计：{total}")
     else:
-        # 准备存入数据库的数据
         details = {p: s for p, s in current_round_input.items()}
         details["茶水费"] = tea_val
         details["操作人"] = st.session_state.my_name
-        
-        with st.spinner("正在同步数据..."):
-            supabase.table("game_rounds").insert({
-                "room_id": room_id, 
-                "round_number": current_round_num + 1, 
-                "details": details
-            }).execute()
-        
+        supabase.table("game_rounds").insert({"room_id": room_id, "round_number": current_round_num + 1, "details": details}).execute()
         st.success("记账成功！")
         time.sleep(0.5)
         st.rerun()
 
-# 重置按钮（通过清除 session_state 中的 key）
-if st.button("🧹 清空当前选择", use_container_width=True):
-    for p in players:
-        if f"sb_{p}" in st.session_state:
-            del st.session_state[f"sb_{p}"]
-    st.rerun()
-
 st.divider()
 
-# --- 7. 历史明细 ---
-st.header("📜 历史流水")
-display_df = df_history[df_history["局数"] > 0]
+# --- 7. 历史明细与删除修改 ---
+st.header("📜 历史流水与管理")
+
+# 过滤掉第 0 局
+display_df = df_history[df_history["局数"] > 0].copy()
+
 if not display_df.empty:
+    # 倒序显示历史，最新的在上面
+    reversed_df = display_df.iloc[::-1]
     cols_order = ["局数"] + players + ["茶水费", "操作人"]
-    st.dataframe(display_df[cols_order].fillna(0), use_container_width=True, hide_index=True)
+    st.dataframe(reversed_df[cols_order], use_container_width=True, hide_index=True)
+
+    # --- 删除功能区 ---
+    st.subheader("⚠️ 数据修正")
+    with st.expander("点击展开管理选项（删除错误记录）"):
+        # 选择要删除的局数
+        target_round = st.selectbox("请选择要删除的局数", options=display_df["局数"].tolist())
+        
+        # 获取该局在数据库中的内部 ID
+        target_id = display_df[display_df["局数"] == target_round]["id"].values[0]
+        
+        if st.button(f"🔥 确认删除第 {target_round} 局", type="secondary", use_container_width=True):
+            # 执行删除
+            supabase.table("game_rounds").delete().eq("id", int(target_id)).execute()
+            st.warning(f"第 {target_round} 局已删除！")
+            time.sleep(1)
+            st.rerun()
+            
+        st.caption("提示：删除后分数会重新计算。如需修改，请先删除错误的一局，然后重新录入。")
+else:
+    st.info("暂无记录")
