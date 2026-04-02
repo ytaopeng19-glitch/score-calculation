@@ -1,2 +1,4 @@
-streamlit
-pandas
+你的打牌项目文件夹/
+├── app.py
+└── .streamlit/
+    └── secrets.toml
